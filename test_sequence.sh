@@ -1,96 +1,80 @@
-// test_objects.c — Phase 1 test program
-//
-// Compile and run:
-//   gcc -Wall -Wextra -O2 -o test_objects test_objects.c object.c -lcrypto
-//   ./test_objects
+#!/usr/bin/env bash
+#
+# test_sequence.sh — End-to-end integration test for PES-VCS
+#
+# Run from the repository root after compiling:
+#   make
+#   ./test_sequence.sh
 
-#include "pes.h"
-#include <stdio.h>
-#include <string.h>
-#include <assert.h>
-#include <stdlib.h>
+set -euo pipefail
 
-// Forward declarations for object.c functions
-int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out);
-int object_read(const ObjectID *id, ObjectType *type_out, void **data_out, size_t *len_out);
-int object_exists(const ObjectID *id);
-void object_path(const ObjectID *id, char *path_out, size_t path_size);
+PES="./pes"
+TEST_DIR="$(mktemp -d)"
 
-void test_blob_storage(void) {
-    const char *content = "Hello, PES-VCS!\n";
-    ObjectID id;
-
-    int rc = object_write(OBJ_BLOB, content, strlen(content), &id);
-    assert(rc == 0);
-
-    char hex[HASH_HEX_SIZE + 1];
-    hash_to_hex(&id, hex);
-    printf("Stored blob with hash: %s\n", hex);
-
-    char path[512];
-    object_path(&id, path, sizeof(path));
-    printf("Object stored at: %s\n", path);
-
-    // Read it back and verify
-    ObjectType type;
-    void *data;
-    size_t len;
-    rc = object_read(&id, &type, &data, &len);
-    assert(rc == 0);
-    assert(type == OBJ_BLOB);
-    assert(len == strlen(content));
-    assert(memcmp(data, content, len) == 0);
-    free(data);
-
-    printf("PASS: blob storage\n");
+cleanup() {
+    rm -rf "$TEST_DIR"
 }
+trap cleanup EXIT
 
-void test_deduplication(void) {
-    const char *content = "Duplicate content\n";
-    ObjectID id1, id2;
+cd "$TEST_DIR"
 
-    object_write(OBJ_BLOB, content, strlen(content), &id1);
-    object_write(OBJ_BLOB, content, strlen(content), &id2);
+echo "=== PES-VCS Integration Test ==="
+echo ""
 
-    assert(memcmp(&id1, &id2, sizeof(ObjectID)) == 0);
+# ── Init ───────────────────────────────────────────────────────────────────
+echo "--- Repository Initialization ---"
+$PES init
+[ -d .pes/objects ] && echo "PASS: .pes/objects exists" || echo "FAIL: .pes/objects missing"
+[ -d .pes/refs/heads ] && echo "PASS: .pes/refs/heads exists" || echo "FAIL: .pes/refs/heads missing"
+[ -f .pes/HEAD ] && echo "PASS: .pes/HEAD exists" || echo "FAIL: .pes/HEAD missing"
+echo ""
 
-    printf("PASS: deduplication\n");
-}
+# ── Add and Status ─────────────────────────────────────────────────────────
+echo "--- Staging Files ---"
+echo "version 1" > file.txt
+echo "hello world" > hello.txt
+$PES add file.txt hello.txt
+echo "Status after add:"
+$PES status
+echo ""
 
-void test_integrity(void) {
-    const char *content = "Test integrity\n";
-    ObjectID id;
-    object_write(OBJ_BLOB, content, strlen(content), &id);
+# ── First Commit ───────────────────────────────────────────────────────────
+echo "--- First Commit ---"
+$PES commit -m "Initial commit"
+echo ""
+echo "Log after first commit:"
+$PES log
+echo ""
 
-    // Corrupt the stored file
-    char path[512];
-    object_path(&id, path, sizeof(path));
+# ── Modify and Recommit ───────────────────────────────────────────────────
+echo "--- Second Commit ---"
+echo "version 2" >> file.txt
+$PES add file.txt
+$PES commit -m "Update file.txt"
+echo ""
 
-    FILE *f = fopen(path, "r+b");
-    assert(f != NULL);
-    fseek(f, 20, SEEK_SET);
-    fputc('X', f);
-    fclose(f);
+# ── Third Commit ──────────────────────────────────────────────────────────
+echo "--- Third Commit ---"
+echo "goodbye" > bye.txt
+$PES add bye.txt
+$PES commit -m "Add farewell"
+echo ""
 
-    // Read should detect corruption
-    ObjectType type;
-    void *data;
-    size_t len;
-    int rc = object_read(&id, &type, &data, &len);
-    assert(rc == -1);  // Must fail integrity check
+echo "--- Full History ---"
+$PES log
+echo ""
 
-    printf("PASS: integrity check\n");
-}
+echo "--- Reference Chain ---"
+echo "HEAD:"
+cat .pes/HEAD
+echo "refs/heads/main:"
+cat .pes/refs/heads/main
+echo ""
 
-int main(void) {
-    // Clean slate
-    system("rm -rf .pes");
-    system("mkdir -p .pes/objects .pes/refs/heads");
+echo "--- Object Store ---"
+echo "Objects created:"
+find .pes/objects -type f | wc -l
+find .pes/objects -type f | sort
+echo ""
 
-    test_blob_storage();
-    test_deduplication();
-    test_integrity();
-
-    printf("\nAll Phase 1 tests passed.\n");
-    return 0;
-}
+echo "=== All integration tests completed ==="
